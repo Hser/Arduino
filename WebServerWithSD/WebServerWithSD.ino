@@ -85,15 +85,15 @@ byte currentTemp;
 //
 byte tempSetpoint;
 byte mac[] = { 
-  0x90, 0xA2, 0xDA, 0x0F, 0xC7, 0xBA }; //physical mac address
+  0xDE, 0xAD, 0xBE, 0xEF, 0xFE, 0xED }; //physical mac address
 byte ip[] = { 
-  192, 168, 1, 200 }; // ip in lan
+  192, 168, 1, 2 }; // ip in lan
 byte gateway[] = { 
   192, 168, 1, 1 }; // internet access via router
 byte subnet[] = { 
   255, 255, 255, 0 }; //subnet mask
 //
-EthernetServer Arduserv(9004); //server port
+EthernetServer Arduserv(80); //server port
 dht11 DHT11;
 
 void setup()
