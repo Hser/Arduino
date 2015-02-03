@@ -1,0 +1,445 @@
+/*--------------------------------------------------------------
+ Program:      eth_websrv_page
+ 
+ Description:  Arduino web server that serves up a basic web
+ page. Does not use the SD card.
+ 
+ Hardware:     Arduino Uno and official Arduino Ethernet
+ shield. Should work with other Arduinos and
+ compatible Ethernet shields.
+ 
+ Software:     Developed using Arduino 1.0.3 software
+ Should be compatible with Arduino 1.0 +
+ 
+ References:   - WebServer example by David A. Mellis and 
+ modified by Tom Igoe
+ - Ethernet library documentation:
+ http://arduino.cc/en/Reference/Ethernet
+ 
+ Date:         7 January 2013
+ 
+ Author:       W.A. Smith, http://startingelectronics.com
+ --------------------------------------------------------------*/
+/*--------------------------------------------------------------
+ This code is meant for the Arduino Ethernet board. 
+ It will be direclty attached to the WIFI router and serve
+ a webpage from which users can connect and manipulate things 
+ around the house e.g. air conditioner, lights, and whatever else
+ is programed to be manipulated
+ 
+ As of 12/30/14 the code is only set up for air condition control.
+ 
+ Hayden
+ 
+ references:
+ 1 http://todbot.com/blog/2008/06/19/how-to-do-big-strings-in-arduino/
+ 2 http://www.2wg.co.nz/PUBLIC.DIR/  
+ 3 SD card datalogger example sketch
+ 4 http://playground.arduino.cc/Code/WebServerST
+ 5 DHTlib http://playground.arduino.cc/main/DHT11Lib
+ 6 MCP lib: https://github.com/adafruit/Adafruit_MCP9808_Library
+ 
+ Updates
+ 1/5/15 - 20:12 - attempting to load website from SD. multiple pages with links instead of interactives and submit button
+  --------------------------------------------------------------*/
+#include <SPI.h>
+#include <Ethernet.h>
+#include <SD.h>
+#include <Wire.h>
+#include "Adafruit_MCP9808.h"
+
+//Reference 1
+//Make sure p_buffer is large enough for the largest string
+//Then just wrap all your static strings in P(),
+//Like this:
+//Serial.print(P(“I am a string which is saved in PROGMEM”))
+//#define   P(str)         (strcpy_P(p_buffer, PSTR(str)), p_buffer)
+//Arduino has this ^^ built in with F() --> Serial.println(F("String Stored in flash");
+#define   k_Cool         0x01
+#define   k_Heat         0x02
+#define   Unit_OFF       0x00
+#define   ON_Hybrid      0x02
+#define   ON_Normal      0x01
+#define   ON_Fan         0x03
+#define   minSetpoint    65
+#define   maxSetpoint    80
+//
+//comment to save ~200B SRAM
+//#define FRAM
+//
+char fileName[12] = "COOLING.htm";
+String postString;
+String readString;
+String serverLogStr = "";
+//String RelayCntrlStr = "";
+String timeStr = "00:00:00";
+//
+const char legalChars[] = "0123456789";
+//char p_buffer[100];
+//char c;
+char mode = ON_Normal;               //Mode can be Normal (i.e. only cool or only heat) or Hybrid (i.e. cool and heat when needed)
+char action = k_Cool;                //Action refers to the current mode of operation for the unit, i.e. heating or cooling
+byte currentTemp;
+//
+byte tempSetpoint;
+byte mac[] = { 
+  0x90, 0xA2, 0xDA, 0x0F, 0xC7, 0xBA }; //physical mac address
+byte ip[] = { 
+  192, 168, 1, 200 }; // ip in lan
+byte gateway[] = { 
+  192, 168, 1, 1 }; // internet access via router
+byte subnet[] = { 
+  255, 255, 255, 0 }; //subnet mask
+//
+EthernetServer Arduserv(9004); //server port
+//dht11 DHT11;
+Adafruit_MCP9808 tempsensor = Adafruit_MCP9808();
+
+void setup()
+{
+  Serial.begin(115200);
+  // make sure that the default chip select pin for SD card is set to
+  // output, even if you don't use it:
+  //Since the SD and Ethernet share the SPI bus only one can be used at a time. 
+  //therefore the chip select for both should be written to output. the libraries
+  //should take care of which is set to high or low...
+  pinMode(4, OUTPUT);
+  // disable w5100 SPI while starting SD-- Reference 4
+  pinMode(10,OUTPUT);
+  digitalWrite(10,HIGH);
+  // see if the card is present and can be initialized:
+  if (!SD.begin(4)) {
+    Serial.println(F("SD fail"));
+    // don't do anything more:
+    return;
+  }
+  Serial.println(F("SD OK"));
+  pinMode(9,OUTPUT);        //otherwise the led voltage floats
+  Ethernet.begin(mac, ip, gateway, subnet);  // initialize Ethernet device
+  delay(2000);
+  Arduserv.begin();           // start to listen for clients
+  #ifdef FRAM
+  Serial.println(freeRam());
+  #endif
+  // Make sure the sensor is found, you can also pass in a different i2c
+  // address with tempsensor.begin(0x19) for example
+  if (!tempsensor.begin()) {
+    Serial.println(F("MCP9808 Error"));
+    return;
+  }
+  //if tempsetpoint exists in EEPROM load it else load 70. TODO...
+}
+
+void loop()
+{
+  //Send Data to Relay Control
+/*EthernetClient clientb;
+if (clientb.connect("192.168.1.12", 9004)&&RelayCntrlStr!="") {
+    // Make a HTTP request:
+    clientb.println(RelayCntrlStr);
+    clientb.println();
+    RelayCntrlStr = "";
+  } 
+  else {
+    // kf you didn't get a connection to the server:
+    Serial.println(F("failed"));
+  }
+// if the server's disconnected, stop the client:
+  if (!clientb.connected()) {
+    Serial.println();
+    Serial.println("disconnecting.");
+    clientb.stop();
+  }*/
+  
+  
+  EthernetClient client = Arduserv.available();                           // try to get client
+  if (client) {    
+    boolean currentLineIsBlank = true;
+    boolean currentLineIsGET = true;
+    //int loopCount = 0;
+    while (client.connected()){
+      if (client.available()){                                          // client data available to read
+        char c = client.read();                                         // read 1 byte (character) from client 
+        // read char by char HTTP request into a string but only the first line in order to save memory
+        if (currentLineIsGET){
+          readString += c;                                                
+        }
+        // respond to client only after last line received i.e. "\r\n\r\n"    
+        if ((c == '\n') && (currentLineIsBlank)) {
+          ////// Here is where the POST data is. 
+          //readString= readString.substring(0,50); //clear some memory for post string
+          postString="POST:"; 
+          while(client.available())
+          {
+            c = client.read();
+            postString += c;
+          }
+          /////////
+          // send a standard http response header
+          client.print("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: keep-alive\r\n"); //send new page
+          client.println();                    // !!!!!!!!!!!!!!!!!!!!!LEAVE THIS LINE. IT IS REQURED FOR WEBPAGE TO RUN!!!!!!!!!!!!!!!!!!!!!!!!
+          //HTTP Request Processing          
+          /*
+          //Check if request is GET or POST and contains "HTTP" 
+          if (((readString.substring(0,3) != "GET") && (readString.substring(0,4) != "POST"))||(readString.indexOf("HTTP") == -1)) { 
+            //If the request is not a GET or POST with "HTTP" on the end 
+            //it is invalid and we ignore it. 
+            //Serial.println("Invalid request\n\r");
+            File ServerLogFile = SD.open("ServrLog.txt", FILE_WRITE);
+            ServerLogFile.print(F("Invalid Server Request:"));
+            ServerLogFile.println(readString);
+            ServerLogFile.println();
+            ServerLogFile.close(); 
+            client.flush(); 
+            client.stop();
+            //serverLogStr=F("Invalid Request");
+            postString = "";
+            readString = "";
+            break; 
+          }*///took out to save space
+          //Ignore browser icon file requests 
+          //We are here to serve application users - not their browsers. 
+          //Serial.println("Checking for favicon");
+          if (readString.indexOf("favicon")>0) { 
+            client.flush(); 
+            client.stop();  
+            readString=""; 
+            postString="";
+            //Serial.println(F("Rejected favicon"));
+            break;
+          }
+          //---------------------http GET request processing before sending page
+          float currentTemp = tempsensor.readTempC()*9.0/5.0 + 32;
+          if(readString.indexOf("ESPGETSP")>0)
+          {
+            readString = "TSP= " + String(tempSetpoint);
+            client.print(readString);
+            break;
+          }
+          //TODO:compile a string (UDP???) to send to wifi AC controller running Thermostat program in order to give it updated info
+          //RelayCntrlStr = F("N=");
+          if(postString.indexOf(F("Function=Heat"))>0)
+          {
+            if (mode!=ON_Normal){
+              serverLogStr += F("Mode-->Normal ");
+              mode=ON_Normal; //so that it comes out of hybrid mode if in it. Due to this line of code the next if (UnitPower) must be below.
+            }
+            action=k_Heat;
+            serverLogStr += F("Action-->Heat ");
+            //RelayCntrlStr += F("2");
+            strcpy(fileName,"HEATING.htm");
+          }
+          else if(postString.indexOf(F("Function=Cool"))>0) 
+          {
+            if (mode!=ON_Normal){
+              serverLogStr += F("Mode-->Normal ");
+              mode=ON_Normal; //so that it comes out of hybrid mode if in it. Due to this line of code the next if (UnitPower) must be below.
+            }
+            action=k_Cool;
+            serverLogStr += F("Action-->Cool ");
+            //RelayCntrlStr += F("4");
+            strcpy(fileName,"COOLING.htm");
+          }
+          else if(postString.indexOf(F("Function=Hybrid"))>0) 
+          {
+            mode=ON_Hybrid;
+            serverLogStr += F("Mode-->Hybrid ");
+            strcpy(fileName,"HYBRID.htm");
+          }
+          if(postString.indexOf(F("Function=Fan+Only"))>0) 
+          {
+            mode=ON_Fan;
+            serverLogStr += F("Mode-->Fan Only ");
+            //RelayCntrlStr += F("8");
+            strcpy(fileName,"FANONLY.htm");
+          }
+          else if(postString.indexOf(F("mode=0"))>0)
+          {
+            mode=Unit_OFF;
+            serverLogStr += F("Mode-->OFF ");
+            strcpy(fileName,"UNITOFF.htm");
+          }
+          else if(postString.indexOf(F("mode=1"))>0)
+          {
+            mode=ON_Normal;
+            serverLogStr += F("Mode-->ON_Normal ");
+            strcpy(fileName,"COOLING.htm");
+          }
+          //determine if there is a setpoint change. If so, apply it.
+          //add space which will be searched for later as terminator character when a tempsetpoint is not present.
+          postString += ' ';
+          //the html input type "number" is always added to the url even if there is no user input. This statement tells arduino to disregard it if there was no input.
+          if (postString.indexOf(F("TSetpoint="))>0)  //if no new setpoint is entered
+          {
+            byte newSetpointLoc = postString.indexOf(F("TSetpoint="));            
+            if (postString.charAt(newSetpointLoc+10)!= ' ') {//search for space we added at the location right after "TSetpoint="
+              String newSetpointstr = postString.substring(newSetpointLoc+10,newSetpointLoc+12);
+              if((strchr(legalChars,newSetpointstr[0])!=NULL)&&strchr(legalChars,newSetpointstr[1])!=NULL){
+                tempSetpoint = constrain(newSetpointstr.toInt(),minSetpoint,maxSetpoint);
+                serverLogStr = serverLogStr + F("Setpoint-->") + newSetpointstr;
+                //Serial.println(newSetpointstr);
+                //Serial.println(newSetpointstr.toInt(),DEC);
+                //Serial.print(newSetpointstr[0]);
+                //Serial.print(newSetpointstr[1]);
+                //Serial.println(postString.charAt(newSetpointLoc+10));
+              }
+            }
+          }
+          //SEND WEBPAGE
+          //FEEDBACK FIRST --NOTE this sends a double <html> head..dont know if it will cause issues
+          client.print(F("<head><style>table, th, td {text-align: left;}</style></head>"));
+          client.print(F("<table style=width:10%><caption>FEEDBACK</caption><tr><th>Setpoint</th><td>"));
+          client.print(tempSetpoint,DEC);
+          client.print(F("</td></tr><tr><th>Mode</th><td>"));
+          client.print(mode,DEC);
+          client.print(F("</td></tr><tr><th>Action</th><td>"));
+          client.print(action,DEC);
+          client.print(F("</td></tr><th>Current Temp</th><td>"));
+          //TEMP USING MCP9808
+          // Read and print out the temperature, then convert to *F
+          //float currentTemp = tempsensor.readTempC()*9.0/5.0 + 32;
+          client.print(currentTemp, 2);          
+          //TEMP USING DHT11
+/*          int dhtStatus = DHT11.read(2);
+          switch (dhtStatus)
+          {
+          case 0: 
+            client.print(Fahrenheit(DHT11.temperature), 2); 
+            break;
+          case -1: 
+            client.print(F("Checksum error")); 
+            break;
+          case -2: 
+            client.println(F("Time out error")); 
+            break;
+          default: 
+            client.println(F("Unknown error")); 
+            break;
+          }*/
+          client.print(F("</table>"));
+          //webpage from SD
+          File HTMLfile = SD.open(fileName);
+          if (!HTMLfile) {
+            //DHT11.read(2);
+            // everything else is a 404
+            client.println(F("HTTP/1.1 404 Not Found"));
+            client.println(F("Content-Type: text/html"));
+            client.println();
+            client.println(F("<h2>File Not Found!</h2>"));
+            strcpy(fileName,"COOLING.htm"); //TODO: give a default page to go back to.. 
+            readString = "";
+            postString = "";
+          }
+          else {
+            int16_t p;
+            while ((p = HTMLfile.read()) > 0) {
+              client.print((char)p);
+            }
+            HTMLfile.close();
+          }
+          break;         
+        }//end if c=='\n'...
+        // every line of text received from the client ends with \r\n
+        if (c == '\n') {
+          // last character on line of received text
+          // starting new line with next character read
+          currentLineIsBlank = true;
+          currentLineIsGET = false;//stop storing GET request to save heap mem
+        } 
+        else if (c != '\r') {
+          // a text character was received from client
+          currentLineIsBlank = false;
+        }
+      }  // end if (client.available())
+    }// end while (client.connected())
+    delay(1);     // give the web browser time to receive the data 
+    client.flush();
+    client.stop();// close the connection   
+  }//end if (client) 
+  //I am bringing these out of the client loop incase the serial.Print interrupt is messing with http requests
+  if(readString!=""){
+    Serial.println();
+    Serial.println(readString); //used for debugging
+    Serial.println(postString);
+    Serial.println(serverLogStr);
+    #ifdef FRAM
+    Serial.print(F("heap = "));
+    Serial.println(freeRam());
+    #endif
+    //print current status of all variables for debugging purposes
+    /*Serial.println();
+     Serial.print(F("action   = "));
+     Serial.print(action,DEC);
+     Serial.println(F("  (1 Cool 2 Heat)"));
+     Serial.print(F("mode     = "));
+     Serial.print(mode,DEC);
+     Serial.println(F("  (0 Off 1 Normal 2 Hybrid)"));
+     Serial.print(F("Sp="));
+     Serial.println(tempSetpoint,DEC);
+     Serial.println();*/
+    //clearing strings for next read
+    postString="";
+    readString="";
+    //serverLogStr="";    
+  }
+  //check if need to write to logs on SD
+  //TODO: timeStr = GetTimeStr();                   
+  if (serverLogStr!=""){
+    File ServerLogFile = SD.open("ServrLog.txt", FILE_WRITE);
+    if (!ServerLogFile){
+      Serial.println(F("err:Svrlogfile"));
+    }
+    else {
+      ServerLogFile.println(timeStr);
+      ServerLogFile.println(serverLogStr);
+      ServerLogFile.println(F("-----------------------"));
+      ServerLogFile.close();
+      serverLogStr = "";
+    } 
+  }
+
+}//end void loop
+
+/*void sendFileNotFound(EthernetClient aClient) {
+ aClient.print(F("HTTP/1.0 404 File Not Found\r\n"));
+ aClient.print(F("Content-Type: text/html\r\nConnection: close\r\n\r\n"));
+ aClient.print(F("<html><body><H1>FILE NOT FOUND</H1></body></html>"));
+ aClient.stop();  
+ }
+void sendBadRequest(EthernetClient aClient) {
+ aClient.print(F("HTTP/1.0 400 Bad Request\r\n"));
+ aClient.print(F("Content-Type: text/html\r\nConnection: close\r\n\r\n"));
+ aClient.print(F("<html><body><H1>BAD REQUEST</H1></body></html>"));
+ aClient.stop();  
+ }*/
+// this function will return the number of bytes currently free in RAM
+// written by David A. Mellis
+// based on code by Rob Faludi http://www.faludi.com                   
+/*#ifdef FRAM
+int freeRam () {
+  extern int __heap_start, *__brkval; 
+  int v; 
+  return (int) &v - (__brkval == 0 ? (int) &__heap_start : (int) __brkval); 
+}
+#endif*/
+double Fahrenheit(double celsius)
+{
+  return 1.8 * celsius + 32;
+}
+/*uint8_t * heapptr, * stackptr;
+ void check_mem() {
+ stackptr = (uint8_t *)malloc(4);          // use stackptr temporarily
+ heapptr = stackptr;                     // save value of heap pointer
+ free(stackptr);      // free up the memory again (sets stackptr to 0)
+ stackptr =  (uint8_t *)(SP);           // save value of stack pointer
+ }*/
+
+
+
+
+
+
+
+
+
+
